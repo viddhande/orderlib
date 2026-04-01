@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'slave' }   // ensure your slave node label includes 'agent'
+  agent { label 'slave' }   // ensure your Jenkins agent node has label: slave
 
   options {
     timestamps()
@@ -10,13 +10,20 @@ pipeline {
     APP_NAME   = "orderlib"
     IMAGE_TAG  = "v${BUILD_NUMBER}"
 
-    // SonarQube URL (if SonarQube runs on same SLAVE host)
+    // SonarQube URL (SonarQube container is on same SLAVE host)
     SONAR_HOST_URL = "http://127.0.0.1:9000"
 
-    // These are stored as Jenkins "Secret text" credentials:
+    // Enable BuildKit (removes legacy builder warning)
+    DOCKER_BUILDKIT = "1"
+
+    // Credentials stored in Jenkins:
     NEXUS_DOCKER_REGISTRY = credentials('NEXUS_DOCKER_REGISTRY')  // e.g. 65.0.55.41:8083
     NEXUS_PYPI_URL        = credentials('NEXUS_PYPI_URL')         // e.g. http://65.0.55.41:8081/repository/pypi-hosted/
     SONAR_TOKEN           = credentials('SONAR_TOKEN')
+
+    // Workspace-local SonarScanner path (we will install if missing)
+    SONAR_SCANNER_BIN = "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
+    SONAR_SCANNER_VER = "5.0.1.3006"
   }
 
   stages {
@@ -26,6 +33,7 @@ pipeline {
         checkout scm
         sh '''
           set -e
+          echo "User: $(whoami)"
           python3 --version
           docker --version
         '''
@@ -36,7 +44,7 @@ pipeline {
       steps {
         sh '''
           set -e
-          rm -rf venv dist build *.egg-info coverage.xml .pytest_cache || true
+          rm -rf venv dist build *.egg-info coverage.xml .pytest_cache unit-report.html || true
           python3 -m venv venv
           . venv/bin/activate
           pip install -U pip
@@ -46,12 +54,52 @@ pipeline {
       }
     }
 
+    stage('Install SonarScanner (if missing)') {
+      steps {
+        sh '''
+          set -e
+
+          # If system sonar-scanner exists, good. Otherwise install to workspace.
+          if command -v sonar-scanner >/dev/null 2>&1; then
+            echo "SonarScanner already available in PATH: $(command -v sonar-scanner)"
+            exit 0
+          fi
+
+          # Workspace-local install (no sudo required)
+          echo "SonarScanner not found. Installing locally into ${WORKSPACE}/.tools ..."
+          mkdir -p "${WORKSPACE}/.tools"
+          cd "${WORKSPACE}/.tools"
+
+          # Ensure unzip exists (should be installed on agent once)
+          if ! command -v unzip >/dev/null 2>&1; then
+            echo "ERROR: unzip not found on agent. Install once: sudo apt-get install -y unzip"
+            exit 1
+          fi
+
+          curl -L -o sonar-scanner.zip \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VER}-linux.zip"
+
+          unzip -o sonar-scanner.zip >/dev/null
+          rm -f sonar-scanner.zip
+
+          # Normalize folder name
+          rm -rf sonar-scanner
+          mv "sonar-scanner-${SONAR_SCANNER_VER}-linux" sonar-scanner
+
+          chmod +x "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
+
+          echo "Installed SonarScanner at: ${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
+          "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner" -v
+        '''
+      }
+    }
+
     stage('Build Wheel') {
       steps {
         sh '''
           set -e
           . venv/bin/activate
-          python -m build
+          python3 -m build
           ls -l dist
         '''
       }
@@ -116,16 +164,26 @@ pipeline {
         sh '''
           set -e
           . venv/bin/activate
+
+          # Coverage report for SonarQube
           coverage run -m pytest -q tests/test_unit.py
           coverage xml -o coverage.xml
 
-          sonar-scanner \
+          # Use system sonar-scanner if present, else use workspace-local
+          if command -v sonar-scanner >/dev/null 2>&1; then
+            SCANNER="sonar-scanner"
+          else
+            SCANNER="${SONAR_SCANNER_BIN}"
+          fi
+
+          "$SCANNER" \
             -Dsonar.projectKey=orderlib \
             -Dsonar.projectName=orderlib \
             -Dsonar.sources=app \
             -Dsonar.tests=tests \
             -Dsonar.host.url=${SONAR_HOST_URL} \
-            -Dsonar.login=${SONAR_TOKEN}
+            -Dsonar.login=${SONAR_TOKEN} \
+            -Dsonar.python.coverage.reportPaths=coverage.xml
         '''
       }
     }
@@ -136,6 +194,7 @@ pipeline {
           sh '''
             set -e
             set +x
+            # Create pypirc temporarily (do not commit it)
             cat > ~/.pypirc <<EOP
 [distutils]
 index-servers = nexus
@@ -175,6 +234,7 @@ EOP
 
   post {
     always {
+      // Keep this if disk is limited; otherwise change to "docker system prune -f"
       sh 'docker system prune -af || true'
     }
   }
