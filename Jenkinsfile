@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'agent' }   // ensure your slave node label includes 'agent'
+  agent { label 'slave' }   // ensure your slave node label includes 'agent'
 
   options {
     timestamps()
