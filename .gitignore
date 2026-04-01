@@ -1,0 +1,18 @@
+# Python / venv
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+coverage.xml
+
+# Reports
+unit-report.html
+
+# OS
+.DS_Store

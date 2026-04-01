@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orderlib"
+version = "0.1.0"
+description = "Minimal Python project for CI/CD: wheel, tests, sonar, docker, nexus, argocd"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "flask>=2.3.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
