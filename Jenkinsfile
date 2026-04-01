@@ -1,5 +1,5 @@
 pipeline {
-  agent { label 'slave' }   // ensure your Jenkins agent node has label: slave
+  agent { label 'slave' }
 
   options {
     timestamps()
@@ -10,18 +10,12 @@ pipeline {
     APP_NAME   = "orderlib"
     IMAGE_TAG  = "v${BUILD_NUMBER}"
 
-    // SonarQube URL (SonarQube container is on same SLAVE host)
     SONAR_HOST_URL = "http://127.0.0.1:9000"
 
-    // Enable BuildKit (removes legacy builder warning)
-    DOCKER_BUILDKIT = "1"
-
-    // Credentials stored in Jenkins:
-    NEXUS_DOCKER_REGISTRY = credentials('NEXUS_DOCKER_REGISTRY')  // e.g. 65.0.55.41:8083
-    NEXUS_PYPI_URL        = credentials('NEXUS_PYPI_URL')         // e.g. http://65.0.55.41:8081/repository/pypi-hosted/
+    NEXUS_DOCKER_REGISTRY = credentials('NEXUS_DOCKER_REGISTRY')
+    NEXUS_PYPI_URL        = credentials('NEXUS_PYPI_URL')
     SONAR_TOKEN           = credentials('SONAR_TOKEN')
 
-    // Workspace-local SonarScanner path (we will install if missing)
     SONAR_SCANNER_BIN = "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
     SONAR_SCANNER_VER = "5.0.1.3006"
   }
@@ -59,18 +53,15 @@ pipeline {
         sh '''
           set -e
 
-          # If system sonar-scanner exists, good. Otherwise install to workspace.
           if command -v sonar-scanner >/dev/null 2>&1; then
             echo "SonarScanner already available in PATH: $(command -v sonar-scanner)"
             exit 0
           fi
 
-          # Workspace-local install (no sudo required)
           echo "SonarScanner not found. Installing locally into ${WORKSPACE}/.tools ..."
           mkdir -p "${WORKSPACE}/.tools"
           cd "${WORKSPACE}/.tools"
 
-          # Ensure unzip exists (should be installed on agent once)
           if ! command -v unzip >/dev/null 2>&1; then
             echo "ERROR: unzip not found on agent. Install once: sudo apt-get install -y unzip"
             exit 1
@@ -82,13 +73,10 @@ pipeline {
           unzip -o sonar-scanner.zip >/dev/null
           rm -f sonar-scanner.zip
 
-          # Normalize folder name
           rm -rf sonar-scanner
           mv "sonar-scanner-${SONAR_SCANNER_VER}-linux" sonar-scanner
-
           chmod +x "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
 
-          echo "Installed SonarScanner at: ${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
           "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner" -v
         '''
       }
@@ -104,9 +92,7 @@ pipeline {
         '''
       }
       post {
-        always {
-          archiveArtifacts artifacts: 'dist/*', fingerprint: true
-        }
+        always { archiveArtifacts artifacts: 'dist/*', fingerprint: true }
       }
     }
 
@@ -119,9 +105,7 @@ pipeline {
         '''
       }
       post {
-        always {
-          archiveArtifacts artifacts: 'unit-report.html', fingerprint: true
-        }
+        always { archiveArtifacts artifacts: 'unit-report.html', fingerprint: true }
       }
     }
 
@@ -129,8 +113,11 @@ pipeline {
       steps {
         sh '''
           set -e
-          docker rm -f orderlib-func || true
-          docker build -t orderlib:func-${BUILD_NUMBER} .
+          docker rm -f orderlib-func 2>/dev/null || true
+
+          # Disable BuildKit explicitly to avoid buildx dependency issues
+          DOCKER_BUILDKIT=0 docker build -t orderlib:func-${BUILD_NUMBER} .
+
           docker run -d --name orderlib-func -p 5000:5000 orderlib:func-${BUILD_NUMBER}
           sleep 6
 
@@ -147,7 +134,7 @@ pipeline {
       steps {
         sh '''
           set -e
-          docker rm -f orderlib-perf || true
+          docker rm -f orderlib-perf 2>/dev/null || true
           docker run -d --name orderlib-perf -p 5000:5000 orderlib:func-${BUILD_NUMBER}
           sleep 5
 
@@ -165,11 +152,9 @@ pipeline {
           set -e
           . venv/bin/activate
 
-          # Coverage report for SonarQube
           coverage run -m pytest -q tests/test_unit.py
           coverage xml -o coverage.xml
 
-          # Use system sonar-scanner if present, else use workspace-local
           if command -v sonar-scanner >/dev/null 2>&1; then
             SCANNER="sonar-scanner"
           else
@@ -194,7 +179,6 @@ pipeline {
           sh '''
             set -e
             set +x
-            # Create pypirc temporarily (do not commit it)
             cat > ~/.pypirc <<EOP
 [distutils]
 index-servers = nexus
@@ -224,7 +208,7 @@ EOP
             echo "${NEXUS_PASS}" | docker login ${NEXUS_DOCKER_REGISTRY} -u "${NEXUS_USER}" --password-stdin
             set -x
 
-            docker build -t ${NEXUS_DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG} .
+            DOCKER_BUILDKIT=0 docker build -t ${NEXUS_DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG} .
             docker push ${NEXUS_DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG}
           '''
         }
@@ -234,7 +218,6 @@ EOP
 
   post {
     always {
-      // Keep this if disk is limited; otherwise change to "docker system prune -f"
       sh 'docker system prune -af || true'
     }
   }
