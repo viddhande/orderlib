@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: orderlib
+  namespace: orderlib
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: orderlib
+  template:
+    metadata:
+      labels:
+        app: orderlib
+    spec:
+      imagePullSecrets:
+        - name: nexus-regcred
+      containers:
+        - name: orderlib
+          image: 65.0.55.41:8443/orderlib:v6
+          ports:
+            - containerPort: 5000
