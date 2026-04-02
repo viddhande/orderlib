@@ -10,14 +10,26 @@ pipeline {
     APP_NAME   = "orderlib"
     IMAGE_TAG  = "v${BUILD_NUMBER}"
 
+    // SonarQube URL (change if different)
     SONAR_HOST_URL = "http://127.0.0.1:9000"
 
-    NEXUS_DOCKER_REGISTRY = credentials('NEXUS_DOCKER_REGISTRY')
+    // Nexus values stored as Jenkins Secret Text credentials
+    NEXUS_DOCKER_REGISTRY = credentials('NEXUS_DOCKER_REGISTRY')  // push endpoint (often 8083)
     NEXUS_PYPI_URL        = credentials('NEXUS_PYPI_URL')
     SONAR_TOKEN           = credentials('SONAR_TOKEN')
 
+    // Sonar scanner local install path
     SONAR_SCANNER_BIN = "${WORKSPACE}/.tools/sonar-scanner/bin/sonar-scanner"
     SONAR_SCANNER_VER = "5.0.1.3006"
+
+    // ---- EKS / Deployment config ----
+    AWS_REGION   = "ap-south-1"
+    EKS_CLUSTER  = "orderlib-eks"
+    K8S_NS       = "orderlib"
+
+    // IMPORTANT: registry that Kubernetes nodes will PULL from (HTTPS endpoint)
+    // Example value: 65.0.55.41:8443
+    K8S_IMAGE_REGISTRY = credentials('K8S_IMAGE_REGISTRY')
   }
 
   stages {
@@ -115,9 +127,7 @@ pipeline {
           set -e
           docker rm -f orderlib-func 2>/dev/null || true
 
-          # Disable BuildKit explicitly to avoid buildx dependency issues
           DOCKER_BUILDKIT=0 docker build -t orderlib:func-${BUILD_NUMBER} .
-
           docker run -d --name orderlib-func -p 5000:5000 orderlib:func-${BUILD_NUMBER}
           sleep 6
 
@@ -212,6 +222,48 @@ EOP
             docker push ${NEXUS_DOCKER_REGISTRY}/${APP_NAME}:${IMAGE_TAG}
           '''
         }
+      }
+    }
+
+    // -------------------------------
+    // NEW: Deploy to EKS (CD)
+    // -------------------------------
+    stage('Configure kubeconfig for EKS') {
+      steps {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: 'AWS_CREDS']]) {
+          sh '''
+            set -e
+            aws --version
+            kubectl version --client=true
+
+            # Write kubeconfig for Jenkins runtime user
+            aws eks update-kubeconfig --region ${AWS_REGION} --name ${EKS_CLUSTER}
+
+            kubectl get nodes
+          '''
+        }
+      }
+    }
+
+    stage('Deploy to EKS (kubectl apply)') {
+      steps {
+        sh '''
+          set -e
+
+          # Apply manifests from repo (you created k8s/ folder)
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/deployment.yaml
+
+          # Ensure we deploy the image tag that Jenkins just pushed
+          # IMPORTANT: K8S_IMAGE_REGISTRY should be HTTPS registry that nodes can pull from
+          kubectl -n ${K8S_NS} set image deployment/${APP_NAME} \
+            ${APP_NAME}=${K8S_IMAGE_REGISTRY}/${APP_NAME}:${IMAGE_TAG} --record=true
+
+          kubectl -n ${K8S_NS} rollout status deployment/${APP_NAME} --timeout=180s
+          kubectl -n ${K8S_NS} get pods -o wide
+          kubectl -n ${K8S_NS} get svc -o wide
+        '''
       }
     }
   }
